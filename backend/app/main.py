@@ -10,9 +10,10 @@ import alembic.config
 from alembic import script
 from alembic.runtime import migration
 from sqlalchemy.engine import create_engine, Engine
-from llama_index.text_splitter.utils import split_by_sentence_tokenizer
+from llama_index.node_parser.text.utils import split_by_sentence_tokenizer
 
 from app.api.api import api_router
+from app.db.wait_for_db import check_database_connection
 from app.core.config import settings, AppEnvironment
 from app.loader_io import loader_io_router
 from contextlib import asynccontextmanager
@@ -63,6 +64,8 @@ def __setup_sentry():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # first wait for DB to be connectable
+    await check_database_connection()
     cfg = Config("alembic.ini")
     # Change DB URL to use psycopg2 driver for this specific check
     db_url = settings.DATABASE_URL.replace(
@@ -79,8 +82,12 @@ async def lifespan(app: FastAPI):
     vector_store = cast(CustomPGVectorStore, vector_store)
     await vector_store.run_setup()
 
-    # Some setup is required to initialize the llama-index sentence splitter
-    split_by_sentence_tokenizer()
+    try:
+        # Some setup is required to initialize the llama-index sentence splitter
+        split_by_sentence_tokenizer()
+    except FileExistsError:
+        # Sometimes seen in deployments, should be benign.
+        logger.info("Tried to re-download NLTK files but already exists.")
     yield
     # This section is run on app shutdown
     await vector_store.close()
@@ -94,10 +101,15 @@ app = FastAPI(
 
 
 if settings.BACKEND_CORS_ORIGINS:
+    origins = settings.BACKEND_CORS_ORIGINS.copy()
+    if settings.CODESPACES and settings.CODESPACE_NAME and \
+        settings.ENVIRONMENT == AppEnvironment.LOCAL:
+        # add codespace origin if running in Github codespace
+        origins.append(f"https://{settings.CODESPACE_NAME}-3000.app.github.dev")
     # allow all origins
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=settings.BACKEND_CORS_ORIGINS,
+        allow_origins=origins,
         allow_origin_regex="https://llama-app-frontend.*\.vercel\.app",
         allow_credentials=True,
         allow_methods=["*"],
